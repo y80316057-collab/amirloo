@@ -710,8 +710,8 @@ async def is_user_subscribed(
     try:
         member = await context.bot.get_chat_member(chat_id=chat_id_or_username, user_id=user_id)
     except Exception:
-        # اگر بات دسترسی به چت ندارد، عضویت را تأیید نکنیم تا استفاده از ربات محدود شود
-        return False
+        # اگر بات دسترسی به چت ندارد (مثلاً ادمین نیست یا چت خصوصی است) بررسی را رد می‌کنیم
+        return True
     return member.status not in {"left", "kicked"}
 
 
@@ -775,7 +775,8 @@ async def membership_callback_gate(update: Update, context: ContextTypes.DEFAULT
 async def check_subscriptions_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.callback_query is None:
         return
-    await membership_callback_gate(update, context)
+    if await ensure_required_memberships(update, context, via_callback=True):
+        return
     await update.callback_query.answer("✅ عضویت تأیید شد.")
     try:
         await update.callback_query.edit_message_text(
