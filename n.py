@@ -1,11 +1,13 @@
 import json
+import logging
 import os
-import signal
 import random
 import re
+import signal
 import unicodedata
 import time as pytime
 from datetime import datetime, time, timedelta
+from logging.handlers import RotatingFileHandler
 from uuid import uuid4
 
 import requests
@@ -29,6 +31,7 @@ ADMIN_IDS = {6930517587}
 SUPPORT_ADMIN_ID = 6930517587
 PRIMARY_ADMIN_ID = SUPPORT_ADMIN_ID
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+LOG_FILE = os.path.join(BASE_DIR, "bot.log")
 USER_DATA_FILE = os.path.join(BASE_DIR, "user_data.json")
 PENDING_PAYMENTS_FILE = os.path.join(BASE_DIR, "pending_payments.json")
 CLAN_DATA_FILE = os.path.join(BASE_DIR, "clan_data.json")
@@ -341,6 +344,20 @@ def save_user_data_store(force: bool = False) -> None:
     with open(USER_DATA_FILE, "w", encoding="utf-8") as handle:
         json.dump(user_data_store, handle, ensure_ascii=False, indent=2)
     _USER_LAST_SAVE = now
+
+
+def setup_logging() -> None:
+    logger = logging.getLogger()
+    if logger.handlers:
+        return
+    logger.setLevel(logging.INFO)
+    formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    file_handler = RotatingFileHandler(LOG_FILE, maxBytes=1_000_000, backupCount=3, encoding="utf-8")
+    file_handler.setFormatter(formatter)
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+    logger.addHandler(stream_handler)
 
 
 def load_pending_payments() -> None:
@@ -7051,8 +7068,14 @@ def create_flask_app() -> Flask:
     return app
 
 
+async def log_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger = logging.getLogger(__name__)
+    logger.exception("Unhandled exception while handling update: %s", update, exc_info=context.error)
+
+
 def main():
     global telegram_app
+    setup_logging()
     load_user_data_store()
     load_pending_payments()
     load_clan_data_store()
@@ -7204,8 +7227,10 @@ def main():
         group=1,
     )
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_input))
+    app.add_error_handler(log_error)
 
     def handle_shutdown(signum, frame):
+        logging.getLogger(__name__).info("Shutdown signal received: %s", signum)
         save_user_data_store(force=True)
         save_clan_data_store()
         save_pending_payments()
@@ -7213,8 +7238,8 @@ def main():
     signal.signal(signal.SIGTERM, handle_shutdown)
     signal.signal(signal.SIGINT, handle_shutdown)
 
-    print("Bot is running...")
-    app.run_polling()
+    logging.getLogger(__name__).info("Bot is running...")
+    app.run_polling(drop_pending_updates=True)
 
 
 flask_app = create_flask_app()
