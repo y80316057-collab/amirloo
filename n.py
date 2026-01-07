@@ -1760,7 +1760,7 @@ def format_attack_report(
         f"دمیج واردشده: {damage} 💢\n\n"
         f"{defense_note}\n\n"
         f"💰 سکه‌ها: 🟢 +{attacker_coin_delta} برای مهاجم | 🔴 -{defender_coin_delta} برای مدافع\n"
-        f"🏆 رنک:⬆️ +{attacker_rank_delta} برای مهاجم | ➖ +{defender_rank_delta} برای مدافع\n\n"
+        f"🏆 رنک:⬆️ +{attacker_rank_delta} برای مهاجم | ➖ -{defender_rank_delta} برای مدافع\n\n"
         f"⏰ تاریخ و ساعت: {timestamp.strftime('%Y-%m-%d %H:%M:%S')}"
     )
 
@@ -1784,7 +1784,7 @@ def format_defense_report(
         f"🚀/✈️ سلاح: {missile_name}\n"
         f"💢 دمیج: {damage}\n"
         f"💰 سکه از دست رفته: {defender_coin_loss}\n"
-        f"🏆 رنک: ⬆️ +{attacker_rank_delta} برای مهاجم | ➖ +{defender_rank_delta} برای مدافع\n"
+        f"🏆 رنک: ⬆️ +{attacker_rank_delta} برای مهاجم | ➖ -{defender_rank_delta} برای مدافع\n"
         f"⏰ {timestamp.strftime('%Y-%m-%d %H:%M:%S')}"
     )
 
