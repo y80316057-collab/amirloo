@@ -3761,11 +3761,16 @@ async def group_attack_by_reply(update: Update, context: ContextTypes.DEFAULT_TY
     attacker_record = get_user_record(update.effective_user.id)
     update_league(attacker_record)
     update_league(target_record)
-    today = datetime.now().strftime("%Y-%m-%d")
-    allowed, limit_message = can_crystal_attack_today(attacker_record, target_record, today)
-    if not allowed:
-        await update.message.reply_text(limit_message)
+    duel = get_duel_between(update.effective_chat.id, update.effective_user.id, target_user.id)
+    if duel is None and is_crystal_league(attacker_record):
+        await update.message.reply_text("❌ در لیگ کریستال فقط حمله جهانی مجاز است.")
         return
+    today = datetime.now().strftime("%Y-%m-%d")
+    if duel is None:
+        allowed, limit_message = can_crystal_attack_today(attacker_record, target_record, today)
+        if not allowed:
+            await update.message.reply_text(limit_message)
+            return
     missile_key = find_missile_key(missile_name)
     if missile_key is None:
         await update.message.reply_text("❌ موشک مورد نظر یافت نشد.")
@@ -3810,7 +3815,8 @@ async def group_attack_by_reply(update: Update, context: ContextTypes.DEFAULT_TY
         attacker_record["rank"] = attacker_record.get("rank", 0) + rank_gain
         defender_record["rank"] = max(0, defender_record.get("rank", 0) - rank_loss)
     add_duel_damage(update.effective_chat.id, attacker_record.get("id"), defender_record.get("id"), damage)
-    apply_crystal_attack_limits(attacker_record, defender_record)
+    if duel is None:
+        apply_crystal_attack_limits(attacker_record, defender_record)
     leveled_to_three = apply_experience(attacker_record, missile_experience(missile_name))
     update_league(attacker_record)
     defender_record["last_attack_from"] = update.effective_user.id
@@ -4551,6 +4557,7 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/reset_user <user_id>\n"
         "/reset_all_assets\n"
         "/reset_solarpass <user_id>\n"
+        "/reset_solarpass_all\n"
         "/set_mine_level <user_id> <level>\n"
         "/remove_missile <user_id> <missile_name> <count>\n"
         "/grant_solarpass <user_id>\n"
@@ -4865,6 +4872,9 @@ async def handle_revenge_attack(update: Update, context: ContextTypes.DEFAULT_TY
         return
     update_league(record)
     update_league(target_record)
+    if is_crystal_league(record):
+        await update.message.reply_text("❌ در لیگ کریستال فقط حمله جهانی مجاز است.")
+        return
     today = datetime.now().strftime("%Y-%m-%d")
     allowed, limit_message = can_crystal_attack_today(record, target_record, today)
     if not allowed:
@@ -6496,12 +6506,6 @@ async def starpass_rewards(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     now = datetime.now()
     today_key = starpass_day_key(now)
-    if record["starpass_last_claim"] == today_key:
-        await update.message.reply_text(
-            "🎁 جایزه امروز را قبلاً گرفتید. فردا بعد از ۳:۳۰ بامداد دوباره تلاش کنید.",
-            reply_markup=starpass_menu_markup(),
-        )
-        return
     day_index = record.get("starpass_day", 1)
     if day_index > len(STARPASS_REWARDS):
         await update.message.reply_text(
@@ -7178,6 +7182,27 @@ async def reset_solarpass(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await admin_only_reply(update, f"✅ سولارپس کاربر {user_id} به روز اول ریست شد.")
 
 
+async def reset_solarpass_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message is None or update.effective_user is None:
+        return
+    if not is_admin(update.effective_user.id):
+        await admin_only_reply(update, "⛔️ فقط ادمین اجازه این کار رو داره.")
+        return
+    reset_count = 0
+    for record in user_data_store.values():
+        if record.get("starpass_active"):
+            record["starpass_day"] = 1
+            record["starpass_last_claim"] = None
+            reset_count += 1
+    save_user_data_store()
+    await notify_primary_admin_of_action(
+        context,
+        update.effective_user.id,
+        f"ℹ️ ادمین {update.effective_user.id} سولارپس {reset_count} کاربر را ریست کرد.",
+    )
+    await admin_only_reply(update, f"✅ سولارپس {reset_count} کاربر به روز اول ریست شد.")
+
+
 async def admin_protection_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message is None or update.effective_user is None:
         return
@@ -7511,6 +7536,7 @@ def main():
     app.add_handler(CommandHandler("reset_user", reset_user))
     app.add_handler(CommandHandler("reset_all_assets", reset_all_assets))
     app.add_handler(CommandHandler("reset_solarpass", reset_solarpass))
+    app.add_handler(CommandHandler("reset_solarpass_all", reset_solarpass_all))
     app.add_handler(CommandHandler("set_mine_level", set_mine_level))
     app.add_handler(CommandHandler("remove_missile", remove_missile))
     app.add_handler(CommandHandler("remove_all_patriot", remove_all_patriot))
