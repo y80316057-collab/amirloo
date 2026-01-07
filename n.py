@@ -3445,7 +3445,7 @@ async def group_attack_by_reply(update: Update, context: ContextTypes.DEFAULT_TY
         timestamp=datetime.now(),
         defense_note=defense_note,
     )
-    await update.message.reply_text(report, reply_to_message_id=update.message.message_id)
+    await update.message.reply_text(report)
     defense_report = format_defense_report(
         attacker=attacker_record,
         defender=defender_record,
