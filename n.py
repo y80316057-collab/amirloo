@@ -72,10 +72,10 @@ CHEMICAL_PRICE = 400
 NUCLEAR_PRICE_COINS = 2000
 NUCLEAR_PRICE_GEMS = 1
 SHIELD_PACKS = [
-    {"label": "برنز", "hours": 1, "gems": 3},
-    {"label": "نقره", "hours": 2, "gems": 6},
-    {"label": "طلا", "hours": 3, "gems": 9},
-    {"label": "الماس", "hours": 8, "gems": 25},
+    {"label": "برنز", "hours": 1, "gems": 18},
+    {"label": "نقره", "hours": 2, "gems": 21},
+    {"label": "طلا", "hours": 3, "gems": 24},
+    {"label": "الماس", "hours": 8, "gems": 40},
 ]
 REQUIRED_SUBSCRIPTIONS = [
     {
@@ -219,6 +219,9 @@ LEAGUE_TIERS = [
     (38000, "⚔ تایتان"),
     (47000, "🔮 کریستال"),
 ]
+
+CRYSTAL_DAILY_ATTACK_LIMIT = 30
+CRYSTAL_LEAGUE_NAME = "🔮 کریستال"
 
 STARPASS_COST = 50
 STARPASS_RESET_TIME = time(3, 30)
@@ -434,6 +437,9 @@ def get_user_record(user_id: int) -> dict:
             "last_attack_from": None,
             "revenge_available": False,
             "chat_sticker": None,
+            "daily_attacks_done": 0,
+            "daily_attacks_received": 0,
+            "last_attack_day": None,
             "gold_mine_level": 1,
             "gold_mine_last_collect": None,
             "gold_mine_stored": 0,
@@ -509,6 +515,9 @@ def get_user_record(user_id: int) -> dict:
         "last_attack_from": None,
         "revenge_available": False,
         "chat_sticker": None,
+        "daily_attacks_done": 0,
+        "daily_attacks_received": 0,
+        "last_attack_day": None,
         "gold_mine_level": 1,
         "gold_mine_last_collect": None,
         "gold_mine_stored": 0,
@@ -701,8 +710,8 @@ async def is_user_subscribed(
     try:
         member = await context.bot.get_chat_member(chat_id=chat_id_or_username, user_id=user_id)
     except Exception:
-        # اگر بات دسترسی به چت ندارد (مثلاً ادمین نیست یا چت خصوصی است) بررسی را رد می‌کنیم
-        return True
+        # اگر بات دسترسی به چت ندارد، عضویت را تأیید نکنیم تا استفاده از ربات محدود شود
+        return False
     return member.status not in {"left", "kicked"}
 
 
@@ -2636,6 +2645,37 @@ def reset_daily_boxes_if_needed(record: dict, today: str) -> None:
         record["last_box_open_date"] = today
 
 
+def reset_daily_attack_limits_if_needed(record: dict, today: str) -> None:
+    if record.get("last_attack_day") != today:
+        record["daily_attacks_done"] = 0
+        record["daily_attacks_received"] = 0
+        record["last_attack_day"] = today
+
+
+def is_crystal_league(record: dict) -> bool:
+    return record.get("league") == CRYSTAL_LEAGUE_NAME
+
+
+def can_crystal_attack_today(attacker: dict, defender: dict, today: str) -> tuple[bool, str | None]:
+    reset_daily_attack_limits_if_needed(attacker, today)
+    reset_daily_attack_limits_if_needed(defender, today)
+    if is_crystal_league(attacker) and attacker.get("daily_attacks_done", 0) >= CRYSTAL_DAILY_ATTACK_LIMIT:
+        return False, "❌ سهمیه حمله روزانه لیگ کریستال شما تمام شده است."
+    if is_crystal_league(defender) and defender.get("daily_attacks_received", 0) >= CRYSTAL_DAILY_ATTACK_LIMIT:
+        return False, "❌ سهمیه دریافت حمله روزانه این بازیکن در لیگ کریستال تمام شده است."
+    return True, None
+
+
+def apply_crystal_attack_limits(attacker: dict, defender: dict) -> None:
+    today = datetime.now().strftime("%Y-%m-%d")
+    reset_daily_attack_limits_if_needed(attacker, today)
+    reset_daily_attack_limits_if_needed(defender, today)
+    if is_crystal_league(attacker):
+        attacker["daily_attacks_done"] = attacker.get("daily_attacks_done", 0) + 1
+    if is_crystal_league(defender):
+        defender["daily_attacks_received"] = defender.get("daily_attacks_received", 0) + 1
+
+
 def pick_loot_box_reward() -> tuple[str, str, int]:
     reward = random.choice(LOOT_BOX_REWARDS)
     amount = random.randint(reward["min"], reward["max"])
@@ -3219,6 +3259,14 @@ async def handle_global_attack_missile(update: Update, context: ContextTypes.DEF
         context.user_data["awaiting_global_attack_missile"] = False
         await update.message.reply_text("❌ نمی‌توانید به این ادمین محافظت‌شده حمله کنید.")
         return
+    update_league(record)
+    update_league(opponent_record)
+    today = datetime.now().strftime("%Y-%m-%d")
+    allowed, limit_message = can_crystal_attack_today(record, opponent_record, today)
+    if not allowed:
+        context.user_data["awaiting_global_attack_missile"] = False
+        await update.message.reply_text(limit_message)
+        return
     if is_shield_active(opponent_record):
         context.user_data["awaiting_global_attack_missile"] = False
         remaining = shield_remaining_text(opponent_record)
@@ -3252,6 +3300,7 @@ async def handle_global_attack_missile(update: Update, context: ContextTypes.DEF
         )
         record["rank"] = record.get("rank", 0) + rank_gain
         opponent_record["rank"] = max(0, opponent_record.get("rank", 0) - rank_loss)
+    apply_crystal_attack_limits(record, opponent_record)
     leveled_to_three = apply_experience(record, missile_experience(missile_name))
     update_league(record)
     opponent_record["last_attack_from"] = update.effective_user.id
@@ -3325,6 +3374,13 @@ async def group_attack_by_reply(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text("❌ نمی‌توانید به این ادمین محافظت‌شده حمله کنید.")
         return
     attacker_record = get_user_record(update.effective_user.id)
+    update_league(attacker_record)
+    update_league(target_record)
+    today = datetime.now().strftime("%Y-%m-%d")
+    allowed, limit_message = can_crystal_attack_today(attacker_record, target_record, today)
+    if not allowed:
+        await update.message.reply_text(limit_message)
+        return
     missile_key = find_missile_key(missile_name)
     if missile_key is None:
         await update.message.reply_text("❌ موشک مورد نظر یافت نشد.")
@@ -3368,6 +3424,7 @@ async def group_attack_by_reply(update: Update, context: ContextTypes.DEFAULT_TY
         )
         attacker_record["rank"] = attacker_record.get("rank", 0) + rank_gain
         defender_record["rank"] = max(0, defender_record.get("rank", 0) - rank_loss)
+    apply_crystal_attack_limits(attacker_record, defender_record)
     leveled_to_three = apply_experience(attacker_record, missile_experience(missile_name))
     update_league(attacker_record)
     defender_record["last_attack_from"] = update.effective_user.id
@@ -4414,6 +4471,13 @@ async def handle_revenge_attack(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text("❌ نمی‌توانید به این ادمین محافظت‌شده حمله کنید.")
         return
     record = get_user_record(update.effective_user.id)
+    update_league(record)
+    update_league(target_record)
+    today = datetime.now().strftime("%Y-%m-%d")
+    allowed, limit_message = can_crystal_attack_today(record, target_record, today)
+    if not allowed:
+        await update.message.reply_text(limit_message)
+        return
     remove_single_revenge_target(record, target_id)
     missile_key = find_missile_key(missile_name)
     if missile_key is None:
@@ -4445,6 +4509,7 @@ async def handle_revenge_attack(update: Update, context: ContextTypes.DEFAULT_TY
         )
         record["rank"] = record.get("rank", 0) + rank_gain
         target_record["rank"] = max(0, target_record.get("rank", 0) - rank_loss)
+    apply_crystal_attack_limits(record, target_record)
     leveled_to_three = apply_experience(record, missile_experience(missile_name))
     update_league(record)
     update_league(target_record)
@@ -6649,6 +6714,9 @@ async def reset_all_assets(update: Update, context: ContextTypes.DEFAULT_TYPE):
         record["revenge_available"] = False
         record["revenge_targets"] = []
         record["last_group_attack"] = None
+        record["daily_attacks_done"] = 0
+        record["daily_attacks_received"] = 0
+        record["last_attack_day"] = None
         record["active_defense"] = None
         record["selected_title"] = None
         for key in missile_keys:
