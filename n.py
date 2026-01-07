@@ -107,7 +107,7 @@ CLAN_CREATE_COST = 3000
 CLAN_LEVEL_COSTS = {2: 10000, 3: 15000, 4: 25000, 5: 50000}
 CLAN_TANK_PURCHASE_COST = 100000
 CLAN_TANK_LEVEL_COSTS = {2: 50000, 3: 100000, 4: 150000, 5: 200000}
-CLAN_WAR_TEAM_SIZE = 5
+CLAN_WAR_TEAM_SIZE = 10
 CLAN_WAR_ATTACKS_PER_USER = 5
 CLAN_CASTLE_MAX_LEVEL = 10
 CLAN_CASTLE_LEVEL_COST = 10000
@@ -462,6 +462,7 @@ def get_user_record(user_id: int) -> dict:
             "last_attack_from": None,
             "revenge_available": False,
             "chat_sticker": None,
+            "last_group_chat_id": None,
             "daily_attacks_done": 0,
             "daily_attacks_received": 0,
             "last_attack_day": None,
@@ -542,6 +543,7 @@ def get_user_record(user_id: int) -> dict:
         "last_attack_from": None,
         "revenge_available": False,
         "chat_sticker": None,
+        "last_group_chat_id": None,
         "daily_attacks_done": 0,
         "daily_attacks_received": 0,
         "last_attack_day": None,
@@ -839,6 +841,12 @@ def is_private_chat(update: Update) -> bool:
 def is_group_chat(update: Update) -> bool:
     chat = update.effective_chat
     return chat is not None and chat.type in {"group", "supergroup"}
+
+
+def update_last_group_chat(record: dict, chat_id: int) -> None:
+    if not record or not chat_id:
+        return
+    record["last_group_chat_id"] = chat_id
 
 
 async def reject_if_not_private(update: Update) -> bool:
@@ -1748,6 +1756,27 @@ def format_defense_report(
     )
 
 
+def format_clan_war_attack_report(
+    attacker: dict,
+    clan_name: str,
+    missile_name: str,
+    damage: int,
+    attacks_left: int,
+    timestamp: datetime,
+) -> str:
+    attacker_name = display_name_with_sticker(attacker, "کاربر")
+    attacker_title_line = format_title_quote(attacker)
+    return (
+        "⚔️ حمله کلن وار\n\n"
+        f"👤 مهاجم: {attacker_name}{attacker_title_line}\n"
+        f"🏰 کلن: {clan_name}\n"
+        f"🚀 موشک: {missile_name}\n"
+        f"💢 دمیج: {damage}\n"
+        f"🔁 حمله باقی‌مانده: {attacks_left}\n"
+        f"⏰ {timestamp.strftime('%Y-%m-%d %H:%M:%S')}"
+    )
+
+
 def missiles_menu_markup() -> ReplyKeyboardMarkup:
     keyboard = [
         ["کروز 🚀", "بالستیک 🚀"],
@@ -1946,7 +1975,7 @@ def help_menu_text() -> str:
         "- 🎁 جایزه روزانه: دریافت جوایز روزانه.\n"
         "- ⛏️ معدن طلا: تولید خودکار سکه.\n"
         "- 👥 کلن: ایجاد یا پیوستن به کلن برای رقابت گروهی.\n"
-        "- ⚔️ کلن وار: رقابت ۵ در ۵ بین کلن‌ها.\n\n"
+        "- ⚔️ کلن وار: رقابت ۱۰ در ۱۰ بین کلن‌ها.\n\n"
         "### 💡 نکات کلی:\n"
         "- حمله فقط به کاربران واقعی انجام می‌شود (نه ربات‌ها یا گروه‌ها).\n"
         "- امکان حمله به ادمین‌های محافظت‌شده وجود ندارد.\n"
@@ -3022,6 +3051,9 @@ async def group_loot_box_tracker(update: Update, context: ContextTypes.DEFAULT_T
         return
     if update.message.text is None:
         return
+    if update.effective_user is not None:
+        record = get_user_record(update.effective_user.id)
+        update_last_group_chat(record, update.effective_chat.id)
     chat_id = update.effective_chat.id
     group_message_counts[chat_id] = group_message_counts.get(chat_id, 0) + 1
     if group_message_counts[chat_id] < LOOT_BOX_MESSAGE_THRESHOLD:
@@ -4170,6 +4202,10 @@ async def handle_clan_remove_member(update: Update, context: ContextTypes.DEFAUL
     if member_id == record.get("id"):
         await update.message.reply_text("❌ نمی‌توانید خودتان را حذف کنید.")
         return
+    member_record = get_user_record(member_id)
+    if get_active_clan_war_for_user(member_id):
+        await update.message.reply_text("❌ این عضو در کلن وار فعال است و نمی‌توان حذفش کرد.")
+        return
     members = clan.get("members", [])
     if member_id not in members:
         await update.message.reply_text("❌ این آیدی در کلن نیست.")
@@ -4178,7 +4214,6 @@ async def handle_clan_remove_member(update: Update, context: ContextTypes.DEFAUL
     subs = clan.get("sub_leaders", [])
     if member_id in subs:
         subs.remove(member_id)
-    member_record = get_user_record(member_id)
     member_record["clan_id"] = None
     save_user_data_store()
     save_clan_data_store()
@@ -5268,8 +5303,14 @@ async def clan_leave(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not clan:
         await update.message.reply_text("❌ شما عضو کلن نیستید.")
         return
+    if get_active_clan_war_for_user(record.get("id")):
+        await update.message.reply_text("❌ در کلن وار فعال هستید و نمی‌توانید خارج شوید.")
+        return
     is_leader = user_is_clan_leader(record, clan)
     if is_leader:
+        if any(get_user_record(int(member_id)).get("clan_war_id") for member_id in clan.get("members", [])):
+            await update.message.reply_text("❌ اعضای کلن در کلن وار فعال هستند و نمی‌توانید کلن را حذف کنید.")
+            return
         for member_id in clan.get("members", []):
             member_record = get_user_record(int(member_id))
             member_record["clan_id"] = None
@@ -5300,6 +5341,13 @@ async def start_clan_war_session(
         if len(opponent_members) < CLAN_WAR_TEAM_SIZE:
             return False, "❌ کلن حریف به حد نصاب نرسیده است."
         team_b = random.sample(opponent_members, CLAN_WAR_TEAM_SIZE)
+    announce_chats = set()
+    for candidate_id in (clan.get("leader_id"), opponent.get("leader_id")):
+        if candidate_id:
+            candidate_record = get_user_record(int(candidate_id))
+            chat_id = candidate_record.get("last_group_chat_id")
+            if chat_id:
+                announce_chats.add(int(chat_id))
     war_id = uuid4().hex[:8]
     now = datetime.now()
     starts_at = starts_at or now
@@ -5316,6 +5364,7 @@ async def start_clan_war_session(
         "damage_totals": {str(clan.get("id")): 0, str(opponent.get("id")): 0},
         "damage_by_user": {},
         "completed": False,
+        "announce_chats": list(announce_chats),
         "starts_at": starts_at.isoformat(),
         "started_at": None,
         "prep_started_at": now.isoformat(),
@@ -5604,6 +5653,7 @@ async def handle_clan_war_attack(update: Update, context: ContextTypes.DEFAULT_T
     if clan_id is None:
         await update.message.reply_text("❌ اطلاعات کلن وار یافت نشد.")
         return
+    clan_name = clan_data_store.get(str(clan_id), {}).get("name", "نامشخص")
     war["damage_totals"][clan_id] = war["damage_totals"].get(clan_id, 0) + damage
     war["damage_by_user"][record.get("id")] = (
         war["damage_by_user"].get(record.get("id"), 0) + damage
@@ -5611,12 +5661,20 @@ async def handle_clan_war_attack(update: Update, context: ContextTypes.DEFAULT_T
     record["clan_war_attacks_left"] = attacks_left - 1
     context.user_data["awaiting_clan_war_attack"] = False
     save_user_data_store()
-    await update.message.reply_text(
-        "✅ حمله در وار ثبت شد.\n"
-        f"🧨 موشک: {missile_name}\n"
-        f"💢 دمیج: {damage}\n"
-        f"🔁 حمله باقی‌مانده: {record['clan_war_attacks_left']}"
+    report = format_clan_war_attack_report(
+        attacker=record,
+        clan_name=clan_name,
+        missile_name=missile_name,
+        damage=damage,
+        attacks_left=record["clan_war_attacks_left"],
+        timestamp=datetime.now(),
     )
+    await update.message.reply_text(report)
+    for chat_id in war.get("announce_chats", []):
+        try:
+            await context.bot.send_message(chat_id=int(chat_id), text=report)
+        except Exception:
+            continue
     total_attacks_left = sum(
         get_user_record(int(user_id)).get("clan_war_attacks_left", 0)
         for user_id in war.get("user_clan_map", {}).keys()
