@@ -179,21 +179,21 @@ TOPUP_PACKS = [
     (200000, "بسته ۲۰۰ هزار تومان"),
 ]
 GEM_PACKS = [
-    {"gems": 50, "price": 100000},
-    {"gems": 120, "price": 200000},
-    {"gems": 200, "price": 300000},
-    {"gems": 600, "price": 700000},
-    {"gems": 900, "price": 1000000},
-    {"gems": 1200, "price": 1400000},
-    {"gems": 2500, "price": 2500000},
-    {"gems": 6000, "price": 5000000},
+    {"gems": 10, "price": 5000},
+    {"gems": 25, "price": 12500},
+    {"gems": 50, "price": 25000},
+    {"gems": 100, "price": 50000},
+    {"gems": 200, "price": 95000},
+    {"gems": 500, "price": 230000},
+    {"gems": 1000, "price": 450000},
+    {"gems": 2500, "price": 1100000},
 ]
 COIN_PACKS = [
-    {"coins": 6000, "price": 35000},
-    {"coins": 13000, "price": 60000},
-    {"coins": 25000, "price": 125000},
-    {"coins": 60000, "price": 270000},
-    {"coins": 120000, "price": 500000},
+    {"coins": 15000, "price": 25000},
+    {"coins": 30000, "price": 35000},
+    {"coins": 50000, "price": 50000},
+    {"coins": 150000, "price": 120000},
+    {"coins": 300000, "price": 200000},
 ]
 SPECIAL_PACKS = []
 BUNDLE_PACKS = []
@@ -2571,14 +2571,30 @@ async def topup_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await reject_if_not_private(update):
         return
     record = get_user_record(update.effective_user.id)
-    context.user_data["awaiting_topup_receipt"] = True
     await update.message.reply_text(
         "💳 افزایش موجودی\n"
         f"💼 موجودی شما: {record['toman']} تومان\n\n"
         "برای شارژ، مبلغ را به شماره کارت زیر واریز کنید و سپس عکس رسید را ارسال کنید:\n"
         f"💳 شماره کارت: {PAYMENT_CARD_NUMBER}\n"
         f"👤 به نام: {PAYMENT_CARD_OWNER}\n\n"
-        "بعد از ارسال رسید، توسط ادمین بررسی می‌شود.",
+        "بعد از واریز، از منوی زیر رسید را ارسال کنید.",
+        reply_markup=ReplyKeyboardMarkup(
+            [["ارسال رسید 🧾"], ["بازگشت به منوی اصلی ↩️"]],
+            resize_keyboard=True,
+        ),
+    )
+
+
+async def topup_receipt_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message is None or update.effective_user is None:
+        return
+    if await reject_if_banned(update, context):
+        return
+    if await reject_if_not_private(update):
+        return
+    context.user_data["awaiting_topup_receipt"] = True
+    await update.message.reply_text(
+        "🧾 لطفاً عکس یا فایل رسید پرداخت را ارسال کنید.",
         reply_markup=ReplyKeyboardMarkup([["بازگشت به منوی اصلی ↩️"]], resize_keyboard=True),
     )
 
@@ -6326,14 +6342,12 @@ async def coin_packs_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if await reject_if_not_private(update):
         return
-    record = get_user_record(update.effective_user.id)
     packs_text = "\n".join(
         f"• {pack['coins']:,} سکه — {format_toman(pack['price'])} تومان"
         for pack in COIN_PACKS
     )
     await update.message.reply_text(
-        "💰 پک‌های سکه\n"
-        "(نرخ پایه: هر ۱,۰۰۰ سکه = ۷,۵۰۰ تومان)\n\n"
+        "💰 پک‌های سکه\n\n"
         f"{packs_text}\n\n"
         "برای انتخاب، یکی از گزینه‌های زیر را بزنید:",
         reply_markup=coin_pack_choice_markup(),
@@ -7532,6 +7546,7 @@ def main():
     app.add_handler(MessageHandler(filters.Regex("^معدن طلا ⛏️$"), gold_mine_menu))
     app.add_handler(MessageHandler(filters.Regex("^معدن جم 💎$"), gem_mine_menu))
     app.add_handler(MessageHandler(filters.Regex("^افزایش موجودی 🔁$"), topup_menu))
+    app.add_handler(MessageHandler(filters.Regex("^ارسال رسید 🧾$"), topup_receipt_menu))
     app.add_handler(MessageHandler(filters.Regex("^پدافند ها 🛡️$"), defense_status_menu))
     app.add_handler(MessageHandler(filters.Regex("^پنل ادمین 🛠️$"), admin_panel))
     app.add_handler(MessageHandler(filters.Regex("^راهنما ❓$"), help_menu))
@@ -7619,6 +7634,7 @@ def main():
         ),
         group=1,
     )
+    app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, handle_topup_receipt))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_input))
     app.add_error_handler(log_error)
 
