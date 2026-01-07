@@ -1,11 +1,14 @@
+import asyncio
 import json
+import logging
 import os
-import signal
 import random
 import re
+import signal
 import unicodedata
 import time as pytime
 from datetime import datetime, time, timedelta
+from logging.handlers import RotatingFileHandler
 from uuid import uuid4
 
 import requests
@@ -29,10 +32,12 @@ ADMIN_IDS = {6930517587}
 SUPPORT_ADMIN_ID = 6930517587
 PRIMARY_ADMIN_ID = SUPPORT_ADMIN_ID
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+LOG_FILE = os.path.join(BASE_DIR, "bot.log")
 USER_DATA_FILE = os.path.join(BASE_DIR, "user_data.json")
 PENDING_PAYMENTS_FILE = os.path.join(BASE_DIR, "pending_payments.json")
 CLAN_DATA_FILE = os.path.join(BASE_DIR, "clan_data.json")
 COIN_TRANSFER_DAILY_LIMIT = 1000
+DUEL_DAILY_LIMIT = 2
 GOLD_MINE_BASE_RATE = 100
 GOLD_MINE_MAX_HOURS = 3
 GOLD_MINE_MAX_LEVEL = 30
@@ -72,10 +77,10 @@ CHEMICAL_PRICE = 400
 NUCLEAR_PRICE_COINS = 2000
 NUCLEAR_PRICE_GEMS = 1
 SHIELD_PACKS = [
-    {"label": "برنز", "hours": 1, "gems": 3},
-    {"label": "نقره", "hours": 2, "gems": 6},
-    {"label": "طلا", "hours": 3, "gems": 9},
-    {"label": "الماس", "hours": 8, "gems": 25},
+    {"label": "برنز", "hours": 1, "gems": 18},
+    {"label": "نقره", "hours": 2, "gems": 21},
+    {"label": "طلا", "hours": 3, "gems": 24},
+    {"label": "الماس", "hours": 8, "gems": 40},
 ]
 REQUIRED_SUBSCRIPTIONS = [
     {
@@ -102,7 +107,7 @@ CLAN_CREATE_COST = 3000
 CLAN_LEVEL_COSTS = {2: 10000, 3: 15000, 4: 25000, 5: 50000}
 CLAN_TANK_PURCHASE_COST = 100000
 CLAN_TANK_LEVEL_COSTS = {2: 50000, 3: 100000, 4: 150000, 5: 200000}
-CLAN_WAR_TEAM_SIZE = 5
+CLAN_WAR_TEAM_SIZE = 10
 CLAN_WAR_ATTACKS_PER_USER = 5
 CLAN_CASTLE_MAX_LEVEL = 10
 CLAN_CASTLE_LEVEL_COST = 10000
@@ -200,6 +205,8 @@ clan_war_queue: list[dict] = []
 telegram_app = None
 group_message_counts = {}
 loot_boxes = {}
+duel_sessions: dict[str, dict] = {}
+duel_requests: dict[str, dict] = {}
 _USER_LAST_SAVE = 0.0
 USER_SAVE_MIN_INTERVAL = 2.0
 
@@ -219,6 +226,9 @@ LEAGUE_TIERS = [
     (38000, "⚔ تایتان"),
     (47000, "🔮 کریستال"),
 ]
+
+CRYSTAL_DAILY_ATTACK_LIMIT = 30
+CRYSTAL_LEAGUE_NAME = "🔮 کریستال"
 
 STARPASS_COST = 50
 STARPASS_RESET_TIME = time(3, 30)
@@ -249,6 +259,8 @@ STARPASS_CHAT_STICKERS = [
 GLOBAL_ATTACK_COOLDOWN_SECONDS = 90
 GLOBAL_ATTACK_REROLL_COST = 10
 NOT_AVAILABLE_TEXT = "این منو وجود نداره."
+DUEL_DURATION = timedelta(minutes=5)
+DUEL_REQUEST_TIMEOUT = timedelta(minutes=2)
 MISSILE_CATEGORIES = [
     ("کروز 🧨", [("قدر", "qadr_missiles"), ("اطلس", "atlas_missiles"), ("خیبرشکن", "kheibar_missiles")]),
     (
@@ -338,6 +350,20 @@ def save_user_data_store(force: bool = False) -> None:
     with open(USER_DATA_FILE, "w", encoding="utf-8") as handle:
         json.dump(user_data_store, handle, ensure_ascii=False, indent=2)
     _USER_LAST_SAVE = now
+
+
+def setup_logging() -> None:
+    logger = logging.getLogger()
+    if logger.handlers:
+        return
+    logger.setLevel(logging.INFO)
+    formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    file_handler = RotatingFileHandler(LOG_FILE, maxBytes=1_000_000, backupCount=3, encoding="utf-8")
+    file_handler.setFormatter(formatter)
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+    logger.addHandler(stream_handler)
 
 
 def load_pending_payments() -> None:
@@ -430,10 +456,16 @@ def get_user_record(user_id: int) -> dict:
             "hq22_defense": 0,
             "active_defense": None,
             "daily_coin_transfer": 0,
+            "daily_duels_started": 0,
+            "last_duel_day": None,
             "last_coin_transfer_date": None,
             "last_attack_from": None,
             "revenge_available": False,
             "chat_sticker": None,
+            "last_group_chat_id": None,
+            "daily_attacks_done": 0,
+            "daily_attacks_received": 0,
+            "last_attack_day": None,
             "gold_mine_level": 1,
             "gold_mine_last_collect": None,
             "gold_mine_stored": 0,
@@ -505,10 +537,16 @@ def get_user_record(user_id: int) -> dict:
         "hq22_defense": 0,
         "active_defense": None,
         "daily_coin_transfer": 0,
+        "daily_duels_started": 0,
+        "last_duel_day": None,
         "last_coin_transfer_date": None,
         "last_attack_from": None,
         "revenge_available": False,
         "chat_sticker": None,
+        "last_group_chat_id": None,
+        "daily_attacks_done": 0,
+        "daily_attacks_received": 0,
+        "last_attack_day": None,
         "gold_mine_level": 1,
         "gold_mine_last_collect": None,
         "gold_mine_stored": 0,
@@ -766,7 +804,8 @@ async def membership_callback_gate(update: Update, context: ContextTypes.DEFAULT
 async def check_subscriptions_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.callback_query is None:
         return
-    await membership_callback_gate(update, context)
+    if await ensure_required_memberships(update, context, via_callback=True):
+        return
     await update.callback_query.answer("✅ عضویت تأیید شد.")
     try:
         await update.callback_query.edit_message_text(
@@ -802,6 +841,12 @@ def is_private_chat(update: Update) -> bool:
 def is_group_chat(update: Update) -> bool:
     chat = update.effective_chat
     return chat is not None and chat.type in {"group", "supergroup"}
+
+
+def update_last_group_chat(record: dict, chat_id: int) -> None:
+    if not record or not chat_id:
+        return
+    record["last_group_chat_id"] = chat_id
 
 
 async def reject_if_not_private(update: Update) -> bool:
@@ -1217,11 +1262,19 @@ def normalize_sort_name(name: str) -> str:
 
 
 def calculate_attack_damage(
-    attacker: dict, defender: dict, missile_name: str, blocked: bool, missile_key: str | None = None
+    attacker: dict,
+    defender: dict,
+    missile_name: str,
+    blocked: bool,
+    missile_key: str | None = None,
+    include_clan_bonus: bool = False,
 ) -> int:
     if blocked:
         return 0
-    return missile_damage(missile_name, missile_key) + clan_tank_bonus(attacker)
+    damage = missile_damage(missile_name, missile_key)
+    if include_clan_bonus:
+        damage += clan_tank_bonus(attacker)
+    return damage
 
 
 def pick_clan_war_opponent(current_clan_id: str) -> dict | None:
@@ -1703,6 +1756,27 @@ def format_defense_report(
     )
 
 
+def format_clan_war_attack_report(
+    attacker: dict,
+    clan_name: str,
+    missile_name: str,
+    damage: int,
+    attacks_left: int,
+    timestamp: datetime,
+) -> str:
+    attacker_name = display_name_with_sticker(attacker, "کاربر")
+    attacker_title_line = format_title_quote(attacker)
+    return (
+        "⚔️ حمله کلن وار\n\n"
+        f"👤 مهاجم: {attacker_name}{attacker_title_line}\n"
+        f"🏰 کلن: {clan_name}\n"
+        f"🚀 موشک: {missile_name}\n"
+        f"💢 دمیج: {damage}\n"
+        f"🔁 حمله باقی‌مانده: {attacks_left}\n"
+        f"⏰ {timestamp.strftime('%Y-%m-%d %H:%M:%S')}"
+    )
+
+
 def missiles_menu_markup() -> ReplyKeyboardMarkup:
     keyboard = [
         ["کروز 🚀", "بالستیک 🚀"],
@@ -1901,7 +1975,7 @@ def help_menu_text() -> str:
         "- 🎁 جایزه روزانه: دریافت جوایز روزانه.\n"
         "- ⛏️ معدن طلا: تولید خودکار سکه.\n"
         "- 👥 کلن: ایجاد یا پیوستن به کلن برای رقابت گروهی.\n"
-        "- ⚔️ کلن وار: رقابت ۵ در ۵ بین کلن‌ها.\n\n"
+        "- ⚔️ کلن وار: رقابت ۱۰ در ۱۰ بین کلن‌ها.\n\n"
         "### 💡 نکات کلی:\n"
         "- حمله فقط به کاربران واقعی انجام می‌شود (نه ربات‌ها یا گروه‌ها).\n"
         "- امکان حمله به ادمین‌های محافظت‌شده وجود ندارد.\n"
@@ -2636,6 +2710,99 @@ def reset_daily_boxes_if_needed(record: dict, today: str) -> None:
         record["last_box_open_date"] = today
 
 
+def reset_daily_attack_limits_if_needed(record: dict, today: str) -> None:
+    if record.get("last_attack_day") != today:
+        record["daily_attacks_done"] = 0
+        record["daily_attacks_received"] = 0
+        record["last_attack_day"] = today
+
+
+def reset_daily_duel_limits_if_needed(record: dict, today: str) -> None:
+    if record.get("last_duel_day") != today:
+        record["daily_duels_started"] = 0
+        record["last_duel_day"] = today
+
+
+def is_crystal_league(record: dict) -> bool:
+    return record.get("league") == CRYSTAL_LEAGUE_NAME
+
+
+def can_crystal_attack_today(attacker: dict, defender: dict, today: str) -> tuple[bool, str | None]:
+    reset_daily_attack_limits_if_needed(attacker, today)
+    reset_daily_attack_limits_if_needed(defender, today)
+    if is_crystal_league(attacker) and attacker.get("daily_attacks_done", 0) >= CRYSTAL_DAILY_ATTACK_LIMIT:
+        return False, "❌ سهمیه حمله روزانه لیگ کریستال شما تمام شده است."
+    if is_crystal_league(defender) and defender.get("daily_attacks_received", 0) >= CRYSTAL_DAILY_ATTACK_LIMIT:
+        return False, "❌ سهمیه دریافت حمله روزانه این بازیکن در لیگ کریستال تمام شده است."
+    return True, None
+
+
+def apply_crystal_attack_limits(attacker: dict, defender: dict) -> None:
+    today = datetime.now().strftime("%Y-%m-%d")
+    reset_daily_attack_limits_if_needed(attacker, today)
+    reset_daily_attack_limits_if_needed(defender, today)
+    if is_crystal_league(attacker):
+        attacker["daily_attacks_done"] = attacker.get("daily_attacks_done", 0) + 1
+    if is_crystal_league(defender):
+        defender["daily_attacks_received"] = defender.get("daily_attacks_received", 0) + 1
+
+
+def duel_key(chat_id: int, user_a: int, user_b: int) -> str:
+    left, right = sorted([user_a, user_b])
+    return f"{chat_id}:{left}:{right}"
+
+
+def duel_request_key(chat_id: int, user_a: int, user_b: int) -> str:
+    left, right = sorted([user_a, user_b])
+    return f"{chat_id}:{left}:{right}"
+
+
+def user_in_active_duel(user_id: int) -> bool:
+    now = datetime.now()
+    for duel in duel_sessions.values():
+        if duel["ends_at"] <= now:
+            continue
+        if user_id in duel["participants"]:
+            return True
+    return False
+
+
+def get_duel_between(chat_id: int, user_a: int, user_b: int) -> dict | None:
+    key = duel_key(chat_id, user_a, user_b)
+    duel = duel_sessions.get(key)
+    if duel and duel["ends_at"] > datetime.now():
+        return duel
+    return None
+
+
+def is_duel_attack_allowed(chat_id: int, attacker_id: int, defender_id: int) -> bool:
+    if not user_in_active_duel(attacker_id) and not user_in_active_duel(defender_id):
+        return True
+    duel = get_duel_between(chat_id, attacker_id, defender_id)
+    return duel is not None
+
+
+def add_duel_damage(chat_id: int, attacker_id: int, defender_id: int, damage: int) -> None:
+    duel = get_duel_between(chat_id, attacker_id, defender_id)
+    if duel is None:
+        return
+    duel["damage"][attacker_id] = duel["damage"].get(attacker_id, 0) + damage
+
+
+def get_duel_request(chat_id: int, user_a: int, user_b: int) -> dict | None:
+    key = duel_request_key(chat_id, user_a, user_b)
+    request = duel_requests.get(key)
+    if request and request["expires_at"] > datetime.now():
+        return request
+    duel_requests.pop(key, None)
+    return None
+
+
+def clear_duel_request(chat_id: int, user_a: int, user_b: int) -> None:
+    key = duel_request_key(chat_id, user_a, user_b)
+    duel_requests.pop(key, None)
+
+
 def pick_loot_box_reward() -> tuple[str, str, int]:
     reward = random.choice(LOOT_BOX_REWARDS)
     amount = random.randint(reward["min"], reward["max"])
@@ -2884,6 +3051,9 @@ async def group_loot_box_tracker(update: Update, context: ContextTypes.DEFAULT_T
         return
     if update.message.text is None:
         return
+    if update.effective_user is not None:
+        record = get_user_record(update.effective_user.id)
+        update_last_group_chat(record, update.effective_chat.id)
     chat_id = update.effective_chat.id
     group_message_counts[chat_id] = group_message_counts.get(chat_id, 0) + 1
     if group_message_counts[chat_id] < LOOT_BOX_MESSAGE_THRESHOLD:
@@ -3219,6 +3389,18 @@ async def handle_global_attack_missile(update: Update, context: ContextTypes.DEF
         context.user_data["awaiting_global_attack_missile"] = False
         await update.message.reply_text("❌ نمی‌توانید به این ادمین محافظت‌شده حمله کنید.")
         return
+    if user_in_active_duel(record.get("id")) or user_in_active_duel(int(opponent_id)):
+        context.user_data["awaiting_global_attack_missile"] = False
+        await update.message.reply_text("⛔️ یکی از شما در دوئل فعال است.")
+        return
+    update_league(record)
+    update_league(opponent_record)
+    today = datetime.now().strftime("%Y-%m-%d")
+    allowed, limit_message = can_crystal_attack_today(record, opponent_record, today)
+    if not allowed:
+        context.user_data["awaiting_global_attack_missile"] = False
+        await update.message.reply_text(limit_message)
+        return
     if is_shield_active(opponent_record):
         context.user_data["awaiting_global_attack_missile"] = False
         remaining = shield_remaining_text(opponent_record)
@@ -3252,6 +3434,7 @@ async def handle_global_attack_missile(update: Update, context: ContextTypes.DEF
         )
         record["rank"] = record.get("rank", 0) + rank_gain
         opponent_record["rank"] = max(0, opponent_record.get("rank", 0) - rank_loss)
+    apply_crystal_attack_limits(record, opponent_record)
     leveled_to_three = apply_experience(record, missile_experience(missile_name))
     update_league(record)
     opponent_record["last_attack_from"] = update.effective_user.id
@@ -3293,6 +3476,201 @@ async def handle_global_attack_missile(update: Update, context: ContextTypes.DEF
     )
 
 
+async def finish_duel_by_key(bot: Bot, key: str | None) -> None:
+    if not key:
+        return
+    duel = duel_sessions.pop(key, None)
+    if duel is None:
+        return
+    chat_id = duel["chat_id"]
+    participants = duel["participants"]
+    damage = duel["damage"]
+    user_a, user_b = participants
+    record_a = get_user_record(user_a)
+    record_b = get_user_record(user_b)
+    name_a = display_name_with_sticker(record_a, "کاربر")
+    name_b = display_name_with_sticker(record_b, "کاربر")
+    damage_a = damage.get(user_a, 0)
+    damage_b = damage.get(user_b, 0)
+    if damage_a == damage_b:
+        result_text = (
+            "⏱ دوئل تمام شد!\n"
+            f"دمیج {name_a}: {damage_a}\n"
+            f"دمیج {name_b}: {damage_b}\n"
+            "نتیجه: مساوی"
+        )
+        await bot.send_message(chat_id=chat_id, text=result_text)
+        if PRIMARY_ADMIN_ID is not None:
+            try:
+                await bot.send_message(chat_id=PRIMARY_ADMIN_ID, text=f"نتیجه دوئل:\n{result_text}")
+            except Exception:
+                pass
+        return
+    winner_id, loser_id = (user_a, user_b) if damage_a > damage_b else (user_b, user_a)
+    loser_record = get_user_record(loser_id)
+    winner_record = get_user_record(winner_id)
+    winner_name = display_name_with_sticker(winner_record, "کاربر")
+    loser_name = display_name_with_sticker(loser_record, "کاربر")
+    transfer = min(1000, loser_record.get("rank", 0))
+    loser_record["rank"] = max(0, loser_record.get("rank", 0) - transfer)
+    winner_record["rank"] = winner_record.get("rank", 0) + transfer
+    update_league(loser_record)
+    update_league(winner_record)
+    save_user_data_store()
+    result_text = (
+        "⏱ دوئل تمام شد!\n"
+        f"دمیج {winner_name}: {damage.get(winner_id, 0)}\n"
+        f"دمیج {loser_name}: {damage.get(loser_id, 0)}\n"
+        f"🏆 برنده: {winner_name}\n"
+        f"🏆 رنک انتقالی: {transfer}"
+    )
+    await bot.send_message(chat_id=chat_id, text=result_text)
+    if PRIMARY_ADMIN_ID is not None:
+        try:
+            await bot.send_message(chat_id=PRIMARY_ADMIN_ID, text=f"نتیجه دوئل:\n{result_text}")
+        except Exception:
+            pass
+
+
+async def finish_duel(context: ContextTypes.DEFAULT_TYPE) -> None:
+    job_data = context.job.data if context.job else None
+    if not isinstance(job_data, dict):
+        return
+    key = job_data.get("key")
+    await finish_duel_by_key(context.bot, key)
+
+
+async def schedule_duel_finish(application, key: str) -> None:
+    await asyncio.sleep(DUEL_DURATION.total_seconds())
+    await finish_duel_by_key(application.bot, key)
+
+
+async def start_duel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message is None or update.effective_user is None:
+        return
+    if await reject_if_not_group(update):
+        return
+    if await reject_if_banned(update, context):
+        return
+    if update.message.reply_to_message is None or update.message.reply_to_message.from_user is None:
+        await update.message.reply_text("❌ برای شروع دوئل باید روی پیام طرف مقابل رپلای کنید.")
+        return
+    opponent = update.message.reply_to_message.from_user
+    if opponent.is_bot or (context.bot and opponent.id == context.bot.id):
+        await update.message.reply_text("❌ نمی‌توانید با ربات دوئل کنید.")
+        return
+    if opponent.id == update.effective_user.id:
+        await update.message.reply_text("❌ نمی‌توانید با خودتان دوئل کنید.")
+        return
+    if user_in_active_duel(update.effective_user.id) or user_in_active_duel(opponent.id):
+        await update.message.reply_text("❌ یکی از شما در دوئل فعال است.")
+        return
+    today = datetime.now().strftime("%Y-%m-%d")
+    requester_record = get_user_record(update.effective_user.id)
+    reset_daily_duel_limits_if_needed(requester_record, today)
+    if requester_record.get("daily_duels_started", 0) >= DUEL_DAILY_LIMIT:
+        await update.message.reply_text("❌ سقف دوئل روزانه شما پر شده است.")
+        return
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    if chat_id is None:
+        return
+    duel_key_value = duel_key(chat_id, update.effective_user.id, opponent.id)
+    if duel_key_value in duel_sessions:
+        await update.message.reply_text("❌ دوئل بین شما در حال اجراست.")
+        return
+    if get_duel_request(chat_id, update.effective_user.id, opponent.id):
+        await update.message.reply_text("❌ درخواست دوئل قبلاً ارسال شده است.")
+        return
+    request_key = duel_request_key(chat_id, update.effective_user.id, opponent.id)
+    duel_requests[request_key] = {
+        "chat_id": chat_id,
+        "from_id": update.effective_user.id,
+        "to_id": opponent.id,
+        "expires_at": datetime.now() + DUEL_REQUEST_TIMEOUT,
+    }
+    accept_markup = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "✅ قبول دوئل",
+                    callback_data=f"duel_accept:{request_key}",
+                ),
+                InlineKeyboardButton(
+                    "❌ رد دوئل",
+                    callback_data=f"duel_reject:{request_key}",
+                ),
+            ]
+        ]
+    )
+    await update.message.reply_text(
+        "⚔️ درخواست دوئل ارسال شد.\n"
+        "حریف باید دکمه قبول را بزند.",
+        reply_markup=accept_markup,
+    )
+
+
+async def duel_request_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.callback_query is None or update.effective_user is None:
+        return
+    query = update.callback_query
+    data = query.data or ""
+    if not data.startswith("duel_"):
+        return
+    parts = data.split(":", 1)
+    if len(parts) != 2:
+        await query.answer("درخواست نامعتبر است.", show_alert=True)
+        return
+    action, request_key = parts
+    request = duel_requests.get(request_key)
+    if request is None or request["expires_at"] <= datetime.now():
+        duel_requests.pop(request_key, None)
+        await query.answer("درخواست دوئل منقضی شد.", show_alert=True)
+        return
+    if update.effective_user.id != request["to_id"]:
+        await query.answer("این درخواست برای شما نیست.", show_alert=True)
+        return
+    if action == "duel_reject":
+        clear_duel_request(request["chat_id"], request["from_id"], request["to_id"])
+        await query.edit_message_text("❌ درخواست دوئل رد شد.")
+        return
+    if user_in_active_duel(request["from_id"]) or user_in_active_duel(request["to_id"]):
+        clear_duel_request(request["chat_id"], request["from_id"], request["to_id"])
+        await query.edit_message_text("❌ یکی از شما در دوئل فعال است.")
+        return
+    chat_id = request["chat_id"]
+    duel_key_value = duel_key(chat_id, request["from_id"], request["to_id"])
+    if duel_key_value in duel_sessions:
+        clear_duel_request(request["chat_id"], request["from_id"], request["to_id"])
+        await query.edit_message_text("❌ دوئل بین شما در حال اجراست.")
+        return
+    today = datetime.now().strftime("%Y-%m-%d")
+    requester_record = get_user_record(request["from_id"])
+    reset_daily_duel_limits_if_needed(requester_record, today)
+    if requester_record.get("daily_duels_started", 0) >= DUEL_DAILY_LIMIT:
+        clear_duel_request(request["chat_id"], request["from_id"], request["to_id"])
+        await query.edit_message_text("❌ سقف دوئل روزانه طرف مقابل پر شده است.")
+        return
+    ends_at = datetime.now() + DUEL_DURATION
+    requester_record["daily_duels_started"] = requester_record.get("daily_duels_started", 0) + 1
+    requester_record["last_duel_day"] = today
+    duel_sessions[duel_key_value] = {
+        "chat_id": chat_id,
+        "participants": (request["from_id"], request["to_id"]),
+        "damage": {request["from_id"]: 0, request["to_id"]: 0},
+        "ends_at": ends_at,
+    }
+    clear_duel_request(request["chat_id"], request["from_id"], request["to_id"])
+    if context.job_queue is not None:
+        context.job_queue.run_once(finish_duel, when=DUEL_DURATION, data={"key": duel_key_value})
+    elif context.application is not None and hasattr(context.application, "create_task"):
+        context.application.create_task(schedule_duel_finish(context.application, duel_key_value))
+    await query.edit_message_text(
+        "⚔️ دوئل شروع شد!\n"
+        f"⏳ مدت: {int(DUEL_DURATION.total_seconds() // 60)} دقیقه\n"
+        "در این مدت فقط می‌توانید به همدیگر حمله کنید."
+    )
+
+
 async def group_attack_by_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message is None or update.effective_user is None:
         return
@@ -3324,7 +3702,17 @@ async def group_attack_by_reply(update: Update, context: ContextTypes.DEFAULT_TY
     if is_admin_protection_enabled(target_record):
         await update.message.reply_text("❌ نمی‌توانید به این ادمین محافظت‌شده حمله کنید.")
         return
+    if not is_duel_attack_allowed(update.effective_chat.id, update.effective_user.id, target_user.id):
+        await update.message.reply_text("⛔️ یکی از شما در دوئل فعال است و نمی‌توانید حمله کنید.")
+        return
     attacker_record = get_user_record(update.effective_user.id)
+    update_league(attacker_record)
+    update_league(target_record)
+    today = datetime.now().strftime("%Y-%m-%d")
+    allowed, limit_message = can_crystal_attack_today(attacker_record, target_record, today)
+    if not allowed:
+        await update.message.reply_text(limit_message)
+        return
     missile_key = find_missile_key(missile_name)
     if missile_key is None:
         await update.message.reply_text("❌ موشک مورد نظر یافت نشد.")
@@ -3368,6 +3756,8 @@ async def group_attack_by_reply(update: Update, context: ContextTypes.DEFAULT_TY
         )
         attacker_record["rank"] = attacker_record.get("rank", 0) + rank_gain
         defender_record["rank"] = max(0, defender_record.get("rank", 0) - rank_loss)
+    add_duel_damage(update.effective_chat.id, attacker_record.get("id"), defender_record.get("id"), damage)
+    apply_crystal_attack_limits(attacker_record, defender_record)
     leveled_to_three = apply_experience(attacker_record, missile_experience(missile_name))
     update_league(attacker_record)
     defender_record["last_attack_from"] = update.effective_user.id
@@ -3388,7 +3778,7 @@ async def group_attack_by_reply(update: Update, context: ContextTypes.DEFAULT_TY
         timestamp=datetime.now(),
         defense_note=defense_note,
     )
-    await update.message.reply_text(report, reply_to_message_id=update.message.message_id)
+    await update.message.reply_text(report)
     defense_report = format_defense_report(
         attacker=attacker_record,
         defender=defender_record,
@@ -3812,6 +4202,10 @@ async def handle_clan_remove_member(update: Update, context: ContextTypes.DEFAUL
     if member_id == record.get("id"):
         await update.message.reply_text("❌ نمی‌توانید خودتان را حذف کنید.")
         return
+    member_record = get_user_record(member_id)
+    if get_active_clan_war_for_user(member_id):
+        await update.message.reply_text("❌ این عضو در کلن وار فعال است و نمی‌توان حذفش کرد.")
+        return
     members = clan.get("members", [])
     if member_id not in members:
         await update.message.reply_text("❌ این آیدی در کلن نیست.")
@@ -3820,7 +4214,6 @@ async def handle_clan_remove_member(update: Update, context: ContextTypes.DEFAUL
     subs = clan.get("sub_leaders", [])
     if member_id in subs:
         subs.remove(member_id)
-    member_record = get_user_record(member_id)
     member_record["clan_id"] = None
     save_user_data_store()
     save_clan_data_store()
@@ -4414,6 +4807,16 @@ async def handle_revenge_attack(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text("❌ نمی‌توانید به این ادمین محافظت‌شده حمله کنید.")
         return
     record = get_user_record(update.effective_user.id)
+    if user_in_active_duel(record.get("id")) or user_in_active_duel(int(target_id)):
+        await update.message.reply_text("⛔️ یکی از شما در دوئل فعال است.")
+        return
+    update_league(record)
+    update_league(target_record)
+    today = datetime.now().strftime("%Y-%m-%d")
+    allowed, limit_message = can_crystal_attack_today(record, target_record, today)
+    if not allowed:
+        await update.message.reply_text(limit_message)
+        return
     remove_single_revenge_target(record, target_id)
     missile_key = find_missile_key(missile_name)
     if missile_key is None:
@@ -4445,6 +4848,7 @@ async def handle_revenge_attack(update: Update, context: ContextTypes.DEFAULT_TY
         )
         record["rank"] = record.get("rank", 0) + rank_gain
         target_record["rank"] = max(0, target_record.get("rank", 0) - rank_loss)
+    apply_crystal_attack_limits(record, target_record)
     leveled_to_three = apply_experience(record, missile_experience(missile_name))
     update_league(record)
     update_league(target_record)
@@ -4899,8 +5303,14 @@ async def clan_leave(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not clan:
         await update.message.reply_text("❌ شما عضو کلن نیستید.")
         return
+    if get_active_clan_war_for_user(record.get("id")):
+        await update.message.reply_text("❌ در کلن وار فعال هستید و نمی‌توانید خارج شوید.")
+        return
     is_leader = user_is_clan_leader(record, clan)
     if is_leader:
+        if any(get_user_record(int(member_id)).get("clan_war_id") for member_id in clan.get("members", [])):
+            await update.message.reply_text("❌ اعضای کلن در کلن وار فعال هستند و نمی‌توانید کلن را حذف کنید.")
+            return
         for member_id in clan.get("members", []):
             member_record = get_user_record(int(member_id))
             member_record["clan_id"] = None
@@ -4931,6 +5341,13 @@ async def start_clan_war_session(
         if len(opponent_members) < CLAN_WAR_TEAM_SIZE:
             return False, "❌ کلن حریف به حد نصاب نرسیده است."
         team_b = random.sample(opponent_members, CLAN_WAR_TEAM_SIZE)
+    announce_chats = set()
+    for candidate_id in (clan.get("leader_id"), opponent.get("leader_id")):
+        if candidate_id:
+            candidate_record = get_user_record(int(candidate_id))
+            chat_id = candidate_record.get("last_group_chat_id")
+            if chat_id:
+                announce_chats.add(int(chat_id))
     war_id = uuid4().hex[:8]
     now = datetime.now()
     starts_at = starts_at or now
@@ -4947,6 +5364,7 @@ async def start_clan_war_session(
         "damage_totals": {str(clan.get("id")): 0, str(opponent.get("id")): 0},
         "damage_by_user": {},
         "completed": False,
+        "announce_chats": list(announce_chats),
         "starts_at": starts_at.isoformat(),
         "started_at": None,
         "prep_started_at": now.isoformat(),
@@ -5235,6 +5653,7 @@ async def handle_clan_war_attack(update: Update, context: ContextTypes.DEFAULT_T
     if clan_id is None:
         await update.message.reply_text("❌ اطلاعات کلن وار یافت نشد.")
         return
+    clan_name = clan_data_store.get(str(clan_id), {}).get("name", "نامشخص")
     war["damage_totals"][clan_id] = war["damage_totals"].get(clan_id, 0) + damage
     war["damage_by_user"][record.get("id")] = (
         war["damage_by_user"].get(record.get("id"), 0) + damage
@@ -5242,12 +5661,20 @@ async def handle_clan_war_attack(update: Update, context: ContextTypes.DEFAULT_T
     record["clan_war_attacks_left"] = attacks_left - 1
     context.user_data["awaiting_clan_war_attack"] = False
     save_user_data_store()
-    await update.message.reply_text(
-        "✅ حمله در وار ثبت شد.\n"
-        f"🧨 موشک: {missile_name}\n"
-        f"💢 دمیج: {damage}\n"
-        f"🔁 حمله باقی‌مانده: {record['clan_war_attacks_left']}"
+    report = format_clan_war_attack_report(
+        attacker=record,
+        clan_name=clan_name,
+        missile_name=missile_name,
+        damage=damage,
+        attacks_left=record["clan_war_attacks_left"],
+        timestamp=datetime.now(),
     )
+    await update.message.reply_text(report)
+    for chat_id in war.get("announce_chats", []):
+        try:
+            await context.bot.send_message(chat_id=int(chat_id), text=report)
+        except Exception:
+            continue
     total_attacks_left = sum(
         get_user_record(int(user_id)).get("clan_war_attacks_left", 0)
         for user_id in war.get("user_clan_map", {}).keys()
@@ -6649,6 +7076,11 @@ async def reset_all_assets(update: Update, context: ContextTypes.DEFAULT_TYPE):
         record["revenge_available"] = False
         record["revenge_targets"] = []
         record["last_group_attack"] = None
+        record["daily_attacks_done"] = 0
+        record["daily_attacks_received"] = 0
+        record["last_attack_day"] = None
+        record["daily_duels_started"] = 0
+        record["last_duel_day"] = None
         record["active_defense"] = None
         record["selected_title"] = None
         for key in missile_keys:
@@ -6982,8 +7414,14 @@ def create_flask_app() -> Flask:
     return app
 
 
+async def log_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger = logging.getLogger(__name__)
+    logger.exception("Unhandled exception while handling update: %s", update, exc_info=context.error)
+
+
 def main():
     global telegram_app
+    setup_logging()
     load_user_data_store()
     load_pending_payments()
     load_clan_data_store()
@@ -7029,6 +7467,7 @@ def main():
     app.add_handler(CallbackQueryHandler(redline_wheel_action, pattern="^wheel_redline_"))
     app.add_handler(CallbackQueryHandler(global_attack_action, pattern="^global_attack_"))
     app.add_handler(CallbackQueryHandler(revenge_attack_action, pattern="^revenge_"))
+    app.add_handler(CallbackQueryHandler(duel_request_action, pattern="^duel_"))
     app.add_handler(CallbackQueryHandler(ranking_action, pattern="^ranking_"))
     app.add_handler(CallbackQueryHandler(clan_action, pattern="^clan_"))
     app.add_handler(CallbackQueryHandler(help_action, pattern="^help_"))
@@ -7124,6 +7563,7 @@ def main():
     app.add_handler(MessageHandler(filters.Regex("^فعال کردن تیر بار 🛡️$"), defense_activate_tirbar))
     app.add_handler(MessageHandler(filters.Regex("^فعال کردن .+ 🛡️$"), defense_activate_generic))
     app.add_handler(MessageHandler(filters.Regex("^غیرفعال کردن پدافند ❌$"), defense_deactivate))
+    app.add_handler(MessageHandler(filters.Regex("^(دوئل|فایت)$"), start_duel))
     app.add_handler(
         MessageHandler(filters.Regex("^حمله\\s+.+$") & ~filters.COMMAND, group_attack_by_reply)
     )
@@ -7135,8 +7575,10 @@ def main():
         group=1,
     )
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_input))
+    app.add_error_handler(log_error)
 
     def handle_shutdown(signum, frame):
+        logging.getLogger(__name__).info("Shutdown signal received: %s", signum)
         save_user_data_store(force=True)
         save_clan_data_store()
         save_pending_payments()
@@ -7144,8 +7586,8 @@ def main():
     signal.signal(signal.SIGTERM, handle_shutdown)
     signal.signal(signal.SIGINT, handle_shutdown)
 
-    print("Bot is running...")
-    app.run_polling()
+    logging.getLogger(__name__).info("Bot is running...")
+    app.run_polling(drop_pending_updates=True)
 
 
 flask_app = create_flask_app()
