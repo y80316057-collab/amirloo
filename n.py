@@ -37,6 +37,7 @@ USER_DATA_FILE = os.path.join(BASE_DIR, "user_data.json")
 PENDING_PAYMENTS_FILE = os.path.join(BASE_DIR, "pending_payments.json")
 CLAN_DATA_FILE = os.path.join(BASE_DIR, "clan_data.json")
 COIN_TRANSFER_DAILY_LIMIT = 1000
+DUEL_DAILY_LIMIT = 2
 GOLD_MINE_BASE_RATE = 100
 GOLD_MINE_MAX_HOURS = 3
 GOLD_MINE_MAX_LEVEL = 30
@@ -455,6 +456,8 @@ def get_user_record(user_id: int) -> dict:
             "hq22_defense": 0,
             "active_defense": None,
             "daily_coin_transfer": 0,
+            "daily_duels_started": 0,
+            "last_duel_day": None,
             "last_coin_transfer_date": None,
             "last_attack_from": None,
             "revenge_available": False,
@@ -533,6 +536,8 @@ def get_user_record(user_id: int) -> dict:
         "hq22_defense": 0,
         "active_defense": None,
         "daily_coin_transfer": 0,
+        "daily_duels_started": 0,
+        "last_duel_day": None,
         "last_coin_transfer_date": None,
         "last_attack_from": None,
         "revenge_available": False,
@@ -2683,6 +2688,12 @@ def reset_daily_attack_limits_if_needed(record: dict, today: str) -> None:
         record["last_attack_day"] = today
 
 
+def reset_daily_duel_limits_if_needed(record: dict, today: str) -> None:
+    if record.get("last_duel_day") != today:
+        record["daily_duels_started"] = 0
+        record["last_duel_day"] = today
+
+
 def is_crystal_league(record: dict) -> bool:
     return record.get("league") == CRYSTAL_LEAGUE_NAME
 
@@ -3443,20 +3454,31 @@ async def finish_duel_by_key(bot: Bot, key: str | None) -> None:
     participants = duel["participants"]
     damage = duel["damage"]
     user_a, user_b = participants
+    record_a = get_user_record(user_a)
+    record_b = get_user_record(user_b)
+    name_a = display_name_with_sticker(record_a, "کاربر")
+    name_b = display_name_with_sticker(record_b, "کاربر")
     damage_a = damage.get(user_a, 0)
     damage_b = damage.get(user_b, 0)
     if damage_a == damage_b:
         result_text = (
             "⏱ دوئل تمام شد!\n"
-            f"دمیج {user_a}: {damage_a}\n"
-            f"دمیج {user_b}: {damage_b}\n"
+            f"دمیج {name_a}: {damage_a}\n"
+            f"دمیج {name_b}: {damage_b}\n"
             "نتیجه: مساوی"
         )
         await bot.send_message(chat_id=chat_id, text=result_text)
+        if PRIMARY_ADMIN_ID is not None:
+            try:
+                await bot.send_message(chat_id=PRIMARY_ADMIN_ID, text=f"نتیجه دوئل:\n{result_text}")
+            except Exception:
+                pass
         return
     winner_id, loser_id = (user_a, user_b) if damage_a > damage_b else (user_b, user_a)
     loser_record = get_user_record(loser_id)
     winner_record = get_user_record(winner_id)
+    winner_name = display_name_with_sticker(winner_record, "کاربر")
+    loser_name = display_name_with_sticker(loser_record, "کاربر")
     transfer = min(1000, loser_record.get("rank", 0))
     loser_record["rank"] = max(0, loser_record.get("rank", 0) - transfer)
     winner_record["rank"] = winner_record.get("rank", 0) + transfer
@@ -3465,12 +3487,17 @@ async def finish_duel_by_key(bot: Bot, key: str | None) -> None:
     save_user_data_store()
     result_text = (
         "⏱ دوئل تمام شد!\n"
-        f"دمیج {winner_id}: {damage.get(winner_id, 0)}\n"
-        f"دمیج {loser_id}: {damage.get(loser_id, 0)}\n"
-        f"🏆 برنده: {winner_id}\n"
+        f"دمیج {winner_name}: {damage.get(winner_id, 0)}\n"
+        f"دمیج {loser_name}: {damage.get(loser_id, 0)}\n"
+        f"🏆 برنده: {winner_name}\n"
         f"🏆 رنک انتقالی: {transfer}"
     )
     await bot.send_message(chat_id=chat_id, text=result_text)
+    if PRIMARY_ADMIN_ID is not None:
+        try:
+            await bot.send_message(chat_id=PRIMARY_ADMIN_ID, text=f"نتیجه دوئل:\n{result_text}")
+        except Exception:
+            pass
 
 
 async def finish_duel(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3505,6 +3532,12 @@ async def start_duel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if user_in_active_duel(update.effective_user.id) or user_in_active_duel(opponent.id):
         await update.message.reply_text("❌ یکی از شما در دوئل فعال است.")
+        return
+    today = datetime.now().strftime("%Y-%m-%d")
+    requester_record = get_user_record(update.effective_user.id)
+    reset_daily_duel_limits_if_needed(requester_record, today)
+    if requester_record.get("daily_duels_started", 0) >= DUEL_DAILY_LIMIT:
+        await update.message.reply_text("❌ سقف دوئل روزانه شما پر شده است.")
         return
     chat_id = update.effective_chat.id if update.effective_chat else None
     if chat_id is None:
@@ -3578,7 +3611,16 @@ async def duel_request_action(update: Update, context: ContextTypes.DEFAULT_TYPE
         clear_duel_request(request["chat_id"], request["from_id"], request["to_id"])
         await query.edit_message_text("❌ دوئل بین شما در حال اجراست.")
         return
+    today = datetime.now().strftime("%Y-%m-%d")
+    requester_record = get_user_record(request["from_id"])
+    reset_daily_duel_limits_if_needed(requester_record, today)
+    if requester_record.get("daily_duels_started", 0) >= DUEL_DAILY_LIMIT:
+        clear_duel_request(request["chat_id"], request["from_id"], request["to_id"])
+        await query.edit_message_text("❌ سقف دوئل روزانه طرف مقابل پر شده است.")
+        return
     ends_at = datetime.now() + DUEL_DURATION
+    requester_record["daily_duels_started"] = requester_record.get("daily_duels_started", 0) + 1
+    requester_record["last_duel_day"] = today
     duel_sessions[duel_key_value] = {
         "chat_id": chat_id,
         "participants": (request["from_id"], request["to_id"]),
@@ -6979,6 +7021,8 @@ async def reset_all_assets(update: Update, context: ContextTypes.DEFAULT_TYPE):
         record["daily_attacks_done"] = 0
         record["daily_attacks_received"] = 0
         record["last_attack_day"] = None
+        record["daily_duels_started"] = 0
+        record["last_duel_day"] = None
         record["active_defense"] = None
         record["selected_title"] = None
         for key in missile_keys:
