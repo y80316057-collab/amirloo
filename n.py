@@ -2777,8 +2777,6 @@ def is_crystal_league(record: dict) -> bool:
 
 
 def can_crystal_attack_today(attacker: dict, defender: dict, today: str) -> tuple[bool, str | None]:
-    if is_crystal_league(attacker) or is_crystal_league(defender):
-        return False, "❌ بازیکن‌های لیگ کریستال اجازه حمله یا دریافت حمله ندارند."
     reset_daily_attack_limits_if_needed(attacker, today)
     reset_daily_attack_limits_if_needed(defender, today)
     if is_crystal_league(attacker) and attacker.get("daily_attacks_done", 0) >= CRYSTAL_DAILY_ATTACK_LIMIT:
@@ -3764,9 +3762,6 @@ async def group_attack_by_reply(update: Update, context: ContextTypes.DEFAULT_TY
     update_league(attacker_record)
     update_league(target_record)
     duel = get_duel_between(update.effective_chat.id, update.effective_user.id, target_user.id)
-    if duel is None and (is_crystal_league(attacker_record) or is_crystal_league(target_record)):
-        await update.message.reply_text("❌ بازیکن‌های لیگ کریستال اجازه حمله یا دریافت حمله ندارند.")
-        return
     today = datetime.now().strftime("%Y-%m-%d")
     if duel is None:
         allowed, limit_message = can_crystal_attack_today(attacker_record, target_record, today)
@@ -4889,9 +4884,6 @@ async def handle_revenge_attack(update: Update, context: ContextTypes.DEFAULT_TY
         return
     update_league(record)
     update_league(target_record)
-    if is_crystal_league(record) or is_crystal_league(target_record):
-        await update.message.reply_text("❌ بازیکن‌های لیگ کریستال اجازه حمله یا دریافت حمله ندارند.")
-        return
     today = datetime.now().strftime("%Y-%m-%d")
     allowed, limit_message = can_crystal_attack_today(record, target_record, today)
     if not allowed:
@@ -6422,6 +6414,26 @@ def starpass_day_key(now: datetime) -> str:
     return (now.date() - timedelta(days=1)).isoformat()
 
 
+def starpass_allowed_day(record: dict, now: datetime) -> int:
+    started_at = record.get("starpass_started_at")
+    if started_at:
+        try:
+            started_dt = datetime.fromisoformat(started_at)
+        except ValueError:
+            started_dt = now
+    else:
+        started_dt = now
+    start_key = starpass_day_key(started_dt)
+    current_key = starpass_day_key(now)
+    try:
+        start_date = datetime.fromisoformat(start_key).date()
+        current_date = datetime.fromisoformat(current_key).date()
+    except ValueError:
+        return 1
+    days_passed = max(0, (current_date - start_date).days)
+    return min(len(STARPASS_REWARDS), days_passed + 1)
+
+
 def apply_starpass_reward(record: dict, reward: dict) -> None:
     if reward.get("coins"):
         record["coins"] += reward["coins"]
@@ -6502,6 +6514,7 @@ async def starpass_purchase_confirm(update: Update, context: ContextTypes.DEFAUL
     record["starpass_active"] = True
     record["starpass_day"] = 1
     record["starpass_last_claim"] = None
+    record["starpass_started_at"] = datetime.now().isoformat()
     save_user_data_store()
     await query.message.reply_text(
         "✅ سولارپس با موفقیت فعال شد!",
@@ -6522,8 +6535,17 @@ async def starpass_rewards(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     now = datetime.now()
+    if not record.get("starpass_started_at"):
+        record["starpass_started_at"] = now.isoformat()
     today_key = starpass_day_key(now)
     day_index = record.get("starpass_day", 1)
+    allowed_day = starpass_allowed_day(record, now)
+    if day_index > allowed_day:
+        await update.message.reply_text(
+            "⏳ هنوز روز بعدی سولارپس باز نشده است.",
+            reply_markup=starpass_menu_markup(),
+        )
+        return
     if day_index > len(STARPASS_REWARDS):
         await update.message.reply_text(
             "✅ تمام جوایز این فصل را دریافت کردید.",
@@ -7193,6 +7215,7 @@ async def reset_solarpass(update: Update, context: ContextTypes.DEFAULT_TYPE):
     record["starpass_active"] = True
     record["starpass_day"] = 1
     record["starpass_last_claim"] = None
+    record["starpass_started_at"] = datetime.now().isoformat()
     log_admin_action(user_id, update.effective_user.id, "ریست سولارپس")
     save_user_data_store()
     await notify_primary_admin_of_action(
@@ -7219,6 +7242,7 @@ async def reset_solarpass_all(update: Update, context: ContextTypes.DEFAULT_TYPE
         if record.get("starpass_active"):
             record["starpass_day"] = 1
             record["starpass_last_claim"] = None
+            record["starpass_started_at"] = datetime.now().isoformat()
             user_id = record.get("id")
             if user_id is not None:
                 log_admin_action(user_id, update.effective_user.id, "ریست سولارپس (همه)")
@@ -7379,6 +7403,7 @@ async def grant_solarpass(update: Update, context: ContextTypes.DEFAULT_TYPE):
     record["starpass_active"] = True
     record["starpass_day"] = 1
     record["starpass_last_claim"] = None
+    record["starpass_started_at"] = datetime.now().isoformat()
     log_admin_action(user_id, update.effective_user.id, "فعال‌سازی سولارپس")
     save_user_data_store()
     await notify_primary_admin_of_action(
