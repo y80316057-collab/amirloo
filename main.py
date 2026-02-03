@@ -2,6 +2,7 @@
 
 Usage examples:
   example
+  auth 123456 abcdef1234567890
   spam حمله اطلس 50 3
   reply user123
 """
@@ -17,6 +18,8 @@ from dataclasses import dataclass
 @dataclass
 class ReplyContext:
     target: str | None = None
+    api_id: str | None = None
+    api_hash: str | None = None
 
 
 def print_help() -> None:
@@ -26,6 +29,10 @@ def print_help() -> None:
     نمایش نمونه دستور.
   reply <name>
     تعیین نام فردی که پیام‌ها به صورت ریپلای برای او چاپ شوند.
+  auth <api_id> <api_hash>
+    ذخیره اطلاعات ورود (صرفاً برای نمایش/نمونه، بدون اتصال واقعی).
+  showauth
+    نمایش وضعیت api_id/api_hash ذخیره‌شده.
   spam <message> <count> <interval_seconds>
     ارسال پیام با فاصله زمانی مشخص (مثال: spam حمله اطلس 50 3)
   quit
@@ -64,6 +71,7 @@ def handle_command(command: str, ctx: ReplyContext) -> bool:
         return True
 
     if stripped == "example":
+        print("مثال: auth 123456 abcdef1234567890")
         print("مثال: spam حمله اطلس 50 3")
         print("الان هر 3 ثانیه یک پیام 'حمله اطلس' تا 50 بار چاپ می‌شود.")
         return True
@@ -75,6 +83,23 @@ def handle_command(command: str, ctx: ReplyContext) -> bool:
             print(f"ریپلای برای {ctx.target} تنظیم شد.")
         else:
             print("نام ریپلای خالی است.")
+        return True
+
+    if stripped.startswith("auth "):
+        _, _, payload = stripped.partition(" ")
+        parts = payload.split()
+        if len(parts) != 2:
+            print("فرمت: auth <api_id> <api_hash>")
+            return True
+        ctx.api_id, ctx.api_hash = parts
+        print("اطلاعات api_id/api_hash ذخیره شد (اتصال واقعی انجام نمی‌شود).")
+        return True
+
+    if stripped == "showauth":
+        if ctx.api_id and ctx.api_hash:
+            print(f"api_id: {ctx.api_id} | api_hash: {ctx.api_hash}")
+        else:
+            print("اطلاعات ورود ثبت نشده است.")
         return True
 
     try:
