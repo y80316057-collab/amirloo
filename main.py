@@ -3,7 +3,7 @@
 Usage examples:
   example
   auth 123456 abcdef1234567890
-  spam حمله اطلس 50 3
+  حمله اطلس 50 3
   reply user123
 """
 
@@ -33,8 +33,8 @@ def print_help() -> None:
     ذخیره اطلاعات ورود (صرفاً برای نمایش/نمونه، بدون اتصال واقعی).
   showauth
     نمایش وضعیت api_id/api_hash ذخیره‌شده.
-  spam <message> <count> <interval_seconds>
-    ارسال پیام با فاصله زمانی مشخص (مثال: spam حمله اطلس 50 3)
+  <message> <count> <interval_seconds>
+    ارسال پیام با فاصله زمانی مشخص (مثال: حمله اطلس 50 3)
   quit
     خروج.
 """
@@ -72,7 +72,7 @@ def handle_command(command: str, ctx: ReplyContext) -> bool:
 
     if stripped == "example":
         print("مثال: auth 123456 abcdef1234567890")
-        print("مثال: spam حمله اطلس 50 3")
+        print("مثال: حمله اطلس 50 3")
         print("الان هر 3 ثانیه یک پیام 'حمله اطلس' تا 50 بار چاپ می‌شود.")
         return True
 
@@ -109,10 +109,16 @@ def handle_command(command: str, ctx: ReplyContext) -> bool:
         return True
 
     if parts and parts[0] == "spam":
-        if len(parts) < 4:
-            print("فرمت: spam <message> <count> <interval_seconds>")
+        parts = parts[1:]
+
+    if parts:
+        if len(parts) < 3:
+            print("فرمت: <message> <count> <interval_seconds>")
             return True
-        message = " ".join(parts[1:-2])
+        message = " ".join(parts[:-2])
+        if not message:
+            print("متن پیام نمی‌تواند خالی باشد.")
+            return True
         try:
             count = int(parts[-2])
             interval = float(parts[-1])
